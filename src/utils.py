@@ -34,7 +34,6 @@ def get_imdb_id(path: str, other_path: str = None, tgt_language: str = None) -> 
 
 def process_metadata_from_omdb(imdb_id, apikey):
     req = f'http://www.omdbapi.com/?i={imdb_id}&apikey={apikey}'
-    # 'http://www.omdbapi.com/?i=tt3896198&apikey=c6def46c'
     # req = f"{base_url}i={imdb_id}"
     try:
         response = requests.get(req).json()
