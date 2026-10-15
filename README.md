@@ -26,6 +26,7 @@ src/
   extract_bitext.py         build train/dev/test bitext + context + IMDb metadata
   preprocess_opensubs.py    Moses detokenisation/normalisation and rule-based cleaning
   generate_blocklist.py     sample a new blocklist from the downloaded XML files
+  extract_alignment_ids.py  map an extracted corpus back to OPUS alignment IDs
   utils.py                  subtitle XML parsing, IMDb ID extraction, OMDb queries
 ```
 
@@ -140,6 +141,49 @@ files are opened in append mode, so delete any previous output before re-running
 `src/generate_blocklist.py` hard-codes the language (`lang`) and the XML root
 (`pre_path`) in `main()`. Edit both before running it. It writes 5,000 randomly chosen
 files to `blocklist/blocklist.<lang>`.
+
+### Mapping a corpus back to OPUS alignment IDs
+
+`src/extract_alignment_ids.py` finds, for each line of an already-extracted split, the
+OPUS alignment link it came from: the aligned pair at the centre of the context window.
+It writes `<split>.alignment_id.cxt` next to `<split>.imdb_id.cxt`. The new file has the
+same number of lines, in the same order, with one tab-separated entry per line:
+
+```
+<fromDoc>	<toDoc>	<link id>
+de/2016/6168742_280289_13_5/1958056852.xml.gz	en/2016/6168742/1957180084.xml.gz	SL412
+```
+
+`fromDoc`, `toDoc` and the link ID are the attributes of the `<linkGrp>` and `<link>` in
+the OPUS alignment file `<pair>/<pair>.xml`. Together with the raw XML files they identify
+the subtitle pair exactly, without depending on this parser. Lines that could not be
+matched are left empty.
+
+```bash
+python src/extract_alignment_ids.py --language de --split_set test --corpus_dir ../data/opensubtitles/v2024/en-de --path_to_opensubs raw_os/OpenSubtitles
+```
+
+`--corpus_dir` must contain the full text of the split (`<split>.en`, `<split>.<lang>`),
+`<split>.imdb_id.cxt` (at the top level or in `context/`), and ideally
+`context/<split>.b1.en` and `context/<split>.a1.en`. The script streams the alignment
+file, rebuilds every aligned pair of the titles in the split, and matches pairs to corpus
+lines in passes:
+
+1. same IMDb ID, same source and target segment, same previous and next source segment;
+2. same IMDb ID, same source and target segment;
+3. with `--cross_title`, same text and context under any IMDb ID. This pass catches
+   titles whose OMDb ID differs from the one in the OpenSubtitles path, but it reads the
+   whole alignment file.
+
+Text is compared after normalisation (lowercase, letters and digits only, bracketed text
+and speaker tags removed). Matching therefore does not depend on the exact cleaning code
+that produced the corpus. Each link is assigned to at most one line, and repeated lines
+are assigned in file order. The log reports how many lines each pass matched and how
+many are left unmatched.
+
+The script cannot tell apart two subtitle versions of the same title whose text and
+context are identical. It then picks the first one in the alignment file, which
+reconstructs the same text.
 
 ## License
 
