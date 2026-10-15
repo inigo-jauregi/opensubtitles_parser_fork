@@ -2,7 +2,6 @@
 set -e
 # Downloads all required ${raw} OpenSubtitles data
 TGTS=(
-    "pl"
     "de"
     "fr"
     "ru"
@@ -20,17 +19,17 @@ for TGT in "${TGTS[@]}"; do
   echo $pairname
 
   mkdir -p $raw/$pairname $raw/xml
-  for lang in $SRC $TGT; do
+  for lang in $TGT; do
     if [ ! -d $raw/xml/$lang ]; then
       if [ ! -f $raw/xml/$lang.zip ]; then
-        wget "http://opus.nlpl.eu/download.php?f=OpenSubtitles/v2018/xml/$lang.zip" -O $raw/xml/$lang.zip
+        wget "https://object.pouta.csc.fi/OPUS-OpenSubtitles/v2024/xml/$lang.zip" -O $raw/xml/$lang.zip
       fi
       unzip -n $raw/xml/$lang.zip -d $raw && rm $raw/xml/$lang.zip
     fi
   done
 
   if [ ! -f $raw/"$pairname"/"$pairname".xml.gz ]; then
-    wget "http://opus.nlpl.eu/download.php?f=OpenSubtitles/v2018/xml/$pairname.xml.gz" -O $raw/$pairname/$pairname.xml.gz
+    wget "https://object.pouta.csc.fi/OPUS-OpenSubtitles/v2024/xml/$pairname.xml.gz" -O $raw/$pairname/$pairname.xml.gz
     zcat $raw/$pairname/$pairname.xml.gz > $raw/$pairname/$pairname.xml
     rm $raw/$pairname/$pairname.xml.gz
   fi

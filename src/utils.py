@@ -12,12 +12,18 @@ logging.basicConfig(level=logging.INFO)
 
 def get_imdb_id(path: str, other_path: str = None, tgt_language: str = None) -> str:
     lg1_imdb_id = path.split('/')[-2]
+    lg1_imdb_id = lg1_imdb_id.split('_')[0]
+    if len(lg1_imdb_id)<8:
+        lg1_imdb_id = lg1_imdb_id.zfill(8)
     if other_path is None:
         return f"tt{lg1_imdb_id}"
 
     else:
         assert tgt_language is not None, "Please provide explicitly the target language"
         lg2_imdb_id = other_path.split('/')[-2]
+        lg2_imdb_id = lg2_imdb_id.split('_')[0]
+        if len(lg2_imdb_id) < 8:
+            lg2_imdb_id = lg2_imdb_id.zfill(8)
         if lg1_imdb_id != lg2_imdb_id and tgt_language == 'de':
             # ids are different; take English one
             imdb_id = lg2_imdb_id
@@ -27,8 +33,9 @@ def get_imdb_id(path: str, other_path: str = None, tgt_language: str = None) -> 
         return f"tt{imdb_id}"
 
 def process_metadata_from_omdb(imdb_id, apikey):
-    base_url = f'http://www.omdbapi.com/?apikey={apikey}&'
-    req = f"{base_url}i={imdb_id}"
+    req = f'http://www.omdbapi.com/?i={imdb_id}&apikey={apikey}'
+    # 'http://www.omdbapi.com/?i=tt3896198&apikey=c6def46c'
+    # req = f"{base_url}i={imdb_id}"
     try:
         response = requests.get(req).json()
     except requests.exceptions.JSONDecodeError:
@@ -37,19 +44,31 @@ def process_metadata_from_omdb(imdb_id, apikey):
     if response["Response"] != "False":
         response = {k: v for k, v in response.items() if v not in ["N/A", "Not rated", "Not Rated", "Unrated"]}
         context = {
+            "title": response['Title'] if 'Title' in response.keys() else "",
             "rated": f"PG rating: {response['Rated']}" if 'Rated' in response.keys() else "",
             "year_of_release": f"Released in {response['Year']}" if 'Year' in response.keys() else "",
             "genre": response["Genre"] if 'Genre' in response.keys() else "",
             "plot": response["Plot"] if 'Plot' in response.keys() else "",
             "country": response["Country"] if 'Country' in response.keys() else "",
             "writers": f"Written by: {response['Writer']}" if 'Writer' in response.keys() else "",
+            "runtime": response["Runtime"] if 'Runtime' in response.keys() else "",
+            "actors": response["Actors"] if 'Actors' in response.keys() else "",
+            "language": response['Language'] if "Language" in response.keys() else "",
+            "awards": response['Awards'] if 'Awards' in response.keys() else "",
+            "imdb_rating": response['imdbRating'] if 'imdbRating' in response.keys() else "",
+            "imdb_votes": response["imdbVotes"] if 'imdbVotes' in response.keys() else "",
+            "imdb_id": response['imdbID'] if 'imdbID' in response.keys() else imdb_id,
+            "type": response['Type'] if 'Type' in response.keys() else "",
+            "poster": response['Poster'] if 'Poster' in response.keys() else ""
         }
 
         return context
     return {}
 
 def write_metadata_to_file(metadata, path_to_context_output, split_set):
-    for field in ["rated", "year_of_release", "genre", "plot", "country", "writers"]:
+    for field in ["rated", "year_of_release", "genre", "plot", "country", "writers", "runtime",
+                  "actors", "language", "awards", "imdb_rating", "imdb_votes", "imdb_id", "type", 'poster',
+                  'title']:
         with open(os.path.join(path_to_context_output, f"{split_set}.{field}.cxt"), 'a+') as f:
             if field in metadata.keys():
                 f.write(repr(metadata[field])[1:-1] + "\n")
