@@ -27,6 +27,8 @@ src/
   preprocess_opensubs.py    Moses detokenisation/normalisation and rule-based cleaning
   generate_blocklist.py     sample a new blocklist from the downloaded XML files
   extract_alignment_ids.py  map an extracted corpus back to OPUS alignment IDs
+  show_alignment.py         resolve alignment IDs to sentence pairs and check them against the corpus
+  subset_alignment_ids.py   copy alignment IDs from a full split to a subset sampled from it
   utils.py                  subtitle XML parsing, IMDb ID extraction, OMDb queries
 ```
 
@@ -181,9 +183,118 @@ that produced the corpus. Each link is assigned to at most one line, and repeate
 are assigned in file order. The log reports how many lines each pass matched and how
 many are left unmatched.
 
+The text and context files must have the same number of lines as
+`<split>.imdb_id.cxt`, otherwise the script stops. An extraction job that was killed
+between writing a sample's text and its metadata leaves the text files with extra
+lines at the end. The dataloader `zip()`s the files, so those lines were never used. In
+that case, add `--truncate`: it drops the extra trailing lines and logs each one it
+drops. It never drops lines when the text files are *shorter* than `imdb_id.cxt`,
+because that means the files are misaligned in the middle. `show_alignment.py` takes
+the same flag.
+
 The script cannot tell apart two subtitle versions of the same title whose text and
 context are identical. It then picks the first one in the alignment file, which
 reconstructs the same text.
+
+### Resolving an alignment ID
+
+A link ID is only unique **within its document pair**. Every `<linkGrp>` in the
+alignment file numbers its links from `SL0`, so thousands of documents have a `SL105`.
+Searching the alignment file for a link ID on its own finds the wrong movie. To resolve
+a line:
+
+1. In `<pair>/<pair>.xml` (e.g. `de-en/de-en.xml`), find the `<linkGrp>` whose `fromDoc`
+   **and** `toDoc` equal the first two fields.
+2. Inside that `<linkGrp>`, find the `<link>` with the link ID, e.g.
+   `<link id="SL105" xtargets="109;106" overlap="0.968" />`.
+3. `xtargets` gives the sentence IDs on each side, separated by `;`. The part before `;`
+   refers to `fromDoc`, the part after to `toDoc`. Here sentence `<s id="109">` of the
+   `fromDoc` file is aligned to `<s id="106">` of the `toDoc` file. A side can list
+   several IDs (`109 110;106`), which are joined into one segment. Sentence IDs are
+   numbered per file, so they do not match each other or the link number.
+4. Join the `<w>` tokens of those sentences in the subtitle XML files under
+   `OpenSubtitles/xml/` (drop the `.gz` from the path).
+
+OPUS orders each pair alphabetically, so `fromDoc` is the German file for `de-en` but the
+English file for `en-fr`. `overlap` measures how much the two subtitles' time spans
+agree. Corpus samples always have `overlap > 0.9`; neighbouring links used as context
+may have lower overlap.
+
+Step 2 by hand, for one line:
+
+```bash
+awk '/fromDoc="de\/1967\/519481_59968_2_59\/1957605709.xml.gz"/ && /toDoc="en\/1967\/519481_59968_2_59\/1957639590.xml.gz"/ {f=1} f && /id="SL105"/ {print; exit}' raw_os/OpenSubtitles/de-en/de-en.xml
+```
+
+### Checking an alignment ID file
+
+`src/show_alignment.py` does all four steps and compares the result with the corpus text.
+Line numbers are 1-based, as in a text editor:
+
+```bash
+python src/show_alignment.py --language de --split_set test --corpus_dir ../data/opensubtitles/v2024/en-de --path_to_opensubs raw_os/OpenSubtitles --line 3661
+```
+
+```
+--- line 3661: OK
+  ids     : de/1967/519481_59968_2_59/1957605709.xml.gz	en/1967/519481_59968_2_59/1957639590.xml.gz	SL105
+  link    : xtargets="109;106" overlap="0.968"
+  OPUS en : ...
+  OPUS de : - Emma Strunk , nichts .
+  corpus en : ...
+  corpus de : Emma Strunk, nichts.
+```
+
+To validate a whole file before release, check a random sample instead:
+
+```bash
+python src/show_alignment.py --language de --split_set test --corpus_dir ../data/opensubtitles/v2024/en-de --path_to_opensubs raw_os/OpenSubtitles --sample 500
+```
+
+The script prints every line that is not `OK`, then a summary. It exits with code 0 only
+if every checked line is `OK`.
+
+| Status | Meaning |
+| --- | --- |
+| `OK` | The resolved OPUS pair matches the corpus text (after normalisation) |
+| `MISMATCH` | The link exists but its text differs from the corpus line |
+| `NOT FOUND` | The document pair or link ID is not in the alignment file |
+| `UNMATCHED` | The line is empty: `extract_alignment_ids.py` could not match it |
+
+Arguments: `--language`, `--split_set`, `--corpus_dir`, `--path_to_opensubs` and
+`--truncate` are the same as for `extract_alignment_ids.py`. `--alignment_ids` points at the ID file if
+it is not `<split>.alignment_id.cxt` in `--corpus_dir` or its `context/`. `--line`
+can be repeated. `--sample N` checks N random lines, chosen with `--seed` (default 1).
+
+### Alignment IDs for a subset
+
+A subset sampled from a full split, such as `v2024_train_dev_subset_with_scenes`, does
+not need OPUS. `src/subset_alignment_ids.py` looks up each subset line in the full split
+and copies that line's alignment ID. Run `extract_alignment_ids.py` on the full split
+first.
+
+```bash
+python src/subset_alignment_ids.py --language de --split_set train --full_dir ../data/opensubtitles/v2024/en-de --subset_dir ../data/opensubtitles/v2024_train_dev_subset_with_scenes/en-de
+```
+
+| Argument | Meaning |
+| --- | --- |
+| `--language`, `-l` | Target language code. |
+| `--split_set`, `-s` | `train` or `dev`. The same split name must exist in both folders. |
+| `--full_dir` | Full split folder: `<split>.en`, `<split>.<lang>`, `<split>.imdb_id.cxt` and `<split>.alignment_id.cxt` (top level or `context/`). |
+| `--subset_dir` | Subset folder: `<split>.en`, `<split>.<lang>` and `<split>.imdb_id.cxt`. |
+| `--output`, `-o` | Output file. Default: `context/<split>.alignment_id.cxt` in `--subset_dir`. |
+| `--truncate` | Ignore extra trailing lines of the `.en`/`.<lang>` text files, in the subset or the full split, as in `extract_alignment_ids.py`. |
+
+A subset line is looked up first by IMDb ID, source and target segment, and every
+`b1`…`b5` / `a1`…`a5` English context file found in both folders. That tells apart
+repeated lines such as "Yes.". A full-split context file whose line count differs from
+`<split>.alignment_id.cxt` is left out of the lookup, with a warning. If that fails, it falls back to IMDb ID and text, then
+to text only. Each full-split line is used at most once. The output has one line per
+subset line, in subset order. A line is empty if it was not found in the full split,
+or if its full-split line has no alignment ID. The log counts lines per lookup level
+and reports `ambiguous` lines, where several unused full-split lines had the same key
+but different IDs.
 
 ## License
 

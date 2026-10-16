@@ -47,6 +47,12 @@ def normalise(text: str) -> str:
     return ''.join(re.findall(r'\w', text.lower()))
 
 
+def title_key(imdb_id: str):
+    """IMDb ID as an integer, so 'tt0023547' (OMDb) and 'tt00023547' (zero-padded path) compare equal."""
+    digits = re.sub(r'\D', '', imdb_id)
+    return int(digits) if digits else None
+
+
 def read_lines(path: str):
     """Read a file split on '\\n' only, so the count matches `wc -l`."""
     with open(path, encoding='utf-8', newline='') as f:
@@ -63,25 +69,41 @@ def find_file(corpus_dir: str, name: str):
     return None
 
 
-def load_corpus(corpus_dir: str, split_set: str, tgt_language: str):
+def truncate_to(files: dict, n: int, truncate: bool):
+    """
+    Check every file in {name: lines} has n lines. With truncate, drop extra lines at the end (e.g. left behind
+    when an extraction job was killed between writing the text and the metadata) and log them.
+    """
+    for name, lines in files.items():
+        if len(lines) == n:
+            continue
+        if len(lines) < n or not truncate:
+            sys.exit(f"Line counts differ: {name} has {len(lines)} lines, {n} expected from imdb_id.cxt. "
+                     + ("Use --truncate if the extra lines are at the end of the file." if len(lines) > n else ""))
+        logging.warning(f"--truncate: dropping the last {len(lines) - n} line(s) of {name}:")
+        for i, line in enumerate(lines[n:], n + 1):
+            logging.warning(f"    line {i}: {line!r}")
+        del lines[n:]
+
+
+def load_corpus(corpus_dir: str, split_set: str, tgt_language: str, truncate: bool = False):
     src = read_lines(os.path.join(corpus_dir, f"{split_set}.en"))
     tgt = read_lines(os.path.join(corpus_dir, f"{split_set}.{tgt_language}"))
     imdb_path = find_file(corpus_dir, f"{split_set}.imdb_id.cxt")
     assert imdb_path, f"No {split_set}.imdb_id.cxt in {corpus_dir} or its context/ folder"
     imdb = read_lines(imdb_path)
-    assert len(src) == len(tgt) == len(imdb), \
-        f"Line counts differ: {len(src) = }, {len(tgt) = }, {len(imdb) = }"
+    truncate_to({f"{split_set}.en": src, f"{split_set}.{tgt_language}": tgt}, len(imdb), truncate)
 
     # Neighbouring source segments, used to tell apart repeated lines ("Yes.", "Thank you.")
     before, after = [''] * len(src), [''] * len(src)
     b1, a1 = find_file(corpus_dir, f"{split_set}.b1.en"), find_file(corpus_dir, f"{split_set}.a1.en")
     if b1 and a1:
         before, after = read_lines(b1), read_lines(a1)
-        assert len(before) == len(after) == len(src), "Context files are not line-aligned with the corpus"
+        truncate_to({b1: before, a1: after}, len(imdb), truncate)
     else:
         logging.warning("No b1/a1 context files found: pass 1 will match on text only")
 
-    return imdb, [normalise(s) for s in src], [normalise(t) for t in tgt], \
+    return [title_key(i) for i in imdb], [normalise(s) for s in src], [normalise(t) for t in tgt], \
         [normalise(b) for b in before], [normalise(a) for a in after]
 
 
@@ -153,14 +175,16 @@ def run_pass(name, align_filename, path_to_xml, en_is_lg1, tgt_language, key_fn,
         return 0
     logging.info(f"Pass '{name}': {sum(len(v) for v in index.values())} lines to match")
 
-    matched = 0
-    for n_doc, link_grp in enumerate(stream_link_groups(align_filename)):
+    matched, n_docs, n_read = 0, 0, 0
+    for n_docs, link_grp in enumerate(stream_link_groups(align_filename), 1):
+        if n_docs % 10000 == 0:
+            logging.info(f"Pass '{name}': {n_docs} documents scanned, {n_read} read, {matched} lines matched")
         from_doc, to_doc = link_grp.attrib['fromDoc'], link_grp.attrib['toDoc']
         lg1_file, lg2_file = from_doc[:-3], to_doc[:-3]
-        titles = {get_imdb_id(lg1_file), get_imdb_id(lg2_file),
-                  get_imdb_id(lg1_file, other_path=lg2_file, tgt_language=tgt_language)}
+        titles = {title_key(get_imdb_id(lg1_file)), title_key(get_imdb_id(lg2_file))} - {None}
         if pending_titles is not None and not titles & pending_titles:
             continue
+        n_read += 1
         for link_id, en, tgt, prev_en, next_en in doc_candidates(link_grp, path_to_xml, en_is_lg1):
             if (from_doc, link_id) in used_links:
                 continue
@@ -174,9 +198,13 @@ def run_pass(name, align_filename, path_to_xml, en_is_lg1, tgt_language, key_fn,
                     used_links.add((from_doc, link_id))
                     matched += 1
                     break
-        if n_doc % 1000 == 0:
-            logging.info(f"Pass '{name}': {n_doc} documents read, {matched} lines matched")
-    logging.info(f"Pass '{name}': matched {matched} lines")
+    logging.info(f"Pass '{name}': {n_docs} documents in {align_filename}, {n_read} belong to titles "
+                 f"in the split, matched {matched} lines")
+    if n_docs == 0:
+        logging.error(f"No <linkGrp> found in {align_filename}")
+    elif n_read == 0 and pending_titles:
+        logging.error(f"No document matches the split's IMDb IDs, e.g. corpus {sorted(pending_titles)[:3]} "
+                      f"vs alignment file {sorted(titles)}. Check --language and --path_to_opensubs.")
     return matched
 
 
@@ -191,6 +219,9 @@ def main():
                         help='Folder with <pair>/<pair>.xml and OpenSubtitles/xml/')
     parser.add_argument('-o', '--output', default=None,
                         help='Output file (default: <split>.alignment_id.cxt next to <split>.imdb_id.cxt)')
+    parser.add_argument('--truncate', action='store_true',
+                        help='If the text or context files have extra lines at the end compared to '
+                             '<split>.imdb_id.cxt, drop them (they are logged) instead of stopping.')
     parser.add_argument('--cross_title', action='store_true',
                         help='Extra pass ignoring the IMDb ID. Reads every document in the alignment file.')
     args = parser.parse_args()
@@ -201,11 +232,15 @@ def main():
     path_to_xml = os.path.join(args.path_to_opensubs, 'OpenSubtitles', 'xml')
     en_is_lg1 = lg1_name == 'en'
 
-    imdb, src, tgt, before, after = load_corpus(args.corpus_dir, args.split_set, args.language)
+    imdb, src, tgt, before, after = load_corpus(args.corpus_dir, args.split_set, args.language, args.truncate)
     n = len(src)
     assignments = [None] * n
     used_links = set()
     logging.info(f"Loaded {n} lines, {len(set(imdb))} titles from {args.corpus_dir}")
+    logging.info(f"Alignment file: {align_filename}, subtitle XML: {path_to_xml}")
+    if not os.path.exists(align_filename):
+        logging.error(f"{align_filename} not found. Check --path_to_opensubs.")
+        return 2
 
     def with_titles(fn):
         return lambda titles, *seg: [fn(t, *seg) for t in titles]
@@ -215,9 +250,9 @@ def main():
         'title + text + context', align_filename, path_to_xml, en_is_lg1, args.language,
         lambda i: (imdb[i], src[i], tgt[i], before[i], after[i]),
         with_titles(lambda t, en, tg, p, nx: (t, en, tg, p, nx)),
-        set(imdb), assignments, used_links)
+        set(imdb) - {None}, assignments, used_links)
 
-    pending = {imdb[i] for i in range(n) if assignments[i] is None}
+    pending = {imdb[i] for i in range(n) if assignments[i] is None} - {None}
     stats['text'] = run_pass(
         'title + text', align_filename, path_to_xml, en_is_lg1, args.language,
         lambda i: (imdb[i], src[i], tgt[i]),
